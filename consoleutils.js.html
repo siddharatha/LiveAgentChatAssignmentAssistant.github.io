@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: consoleutils.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: consoleutils.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>        sforce.connection.sessionId = '{!GETSESSIONID()}';
+        const schat = sforce.console.chat;
+        const sconsole = sforce.console;
+        const monitorChatInterval = 5000; // 5 seconds
+        let primaryTabByChatKey = {};
+        let chatInterval = null;
+
+        /**
+         * Get the LiveChatTranscript Id - The focussed primary tab when the chat ends.
+         * 
+         * @returns {Promise} Promise object represents the String Id of the tab.
+         */
+        const getLiveChatTranscriptTabID = () => {
+            return new Promise((resolve, reject) => {
+                try {
+                    sconsole.getFocusedPrimaryTabId(result => {
+                        resolve(result.id);
+                    });
+                } catch (ex) {
+                    reject(ex);
+                }
+            });
+        }
+
+        /**
+         * Get the LiveChatTranscript Record Id - The record Id of the tab will be used for update later
+         * 
+         * @returns {Promise} Promise object represents the Record Id of the tab.
+         */
+        const getLiveChatTranscriptRecordID = () => {
+            return new Promise((resolve, reject) => {
+                try {
+                    sconsole.getFocusedPrimaryTabObjectId(result => {
+                        resolve(result.id);
+                    });
+                } catch (ex) {
+                    reject(ex);
+                }
+            });
+        }
+
+        /**
+         * Get the Details Subtab usually opened as the first one.
+         * 
+         * @param {String} tabId 
+         * @returns {Promise} Promise object represents the String Id of Subtab.
+         */
+        const getDetailsTabID = (tabId) => {
+            return new Promise((resolve, reject) => {
+                try {
+                    sconsole.getSubtabIds(tabId, result => {
+                        let ids = _.split(result.ids, ',');
+                        let subtabId = ids[0];
+                        resolve(subtabId);
+                    });
+                } catch (ex) {
+                    reject(ex);
+                }
+            });
+        }
+
+        /**
+         * Refreshes the Details subtab of the Primary TabId passed.
+         * 
+         * @param {String} tabId 
+         * @param {Boolean} active 
+         * @returns {Promise} Promise object represents the Boolean success or failure of the refresh.
+         */
+        const refreshDetailsByTabId = (tabId, active) => {
+            return new Promise((resolve, reject) => {
+                try {
+                    getDetailsTabID(tabId)
+                        .then(subTabId => {
+                            sconsole.refreshSubtabById(subTabId,
+                                active, ({
+                                    success
+                                }) => resolve(success));
+                        })
+                        .catch(ex => {
+                            reject(ex);
+                        });
+                } catch (ex) {
+                    reject(ex);
+                }
+            });
+        }
+
+        /**
+         * When a caseId is passed it retrieves the required information for processing.
+         *
+         *@params {String} caseId 
+         *@returns {Promise} promise object with caseId and associated ContactId
+         */
+        const getOpenedCaseInformation = caseId => {
+            return new Promise((resolve, reject) => {
+                try {
+                    let result = sforce.connection.query(
+                        `select id,ContactId from Case where id = '${caseId}'`
+                    );
+                    let records = result.getArray("records");
+                    let caseRecord = _.get(records, 0);
+                    resolve({
+                        caseId: caseId,
+                        ContactId: caseRecord.ContactId
+                    });
+                } catch (ex) {
+                    reject(ex);
+                }
+            });
+        }
+
+        /**
+         * converts a 15digit sfId to 18digit salesforceId.
+         *
+         * @param {String} sfid
+         * @returns {String} 
+         */
+        const convertTo18DigitId = sfid => {
+            var idParts = sfid.match(/(.{5})(.{5})(.{5})/)
+            var base36 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.split('')
+            var output = []
+            var outer, inner, subparts, buffer;
+
+            for (outer = 1; outer &lt;= 3; outer++) {
+                subparts = idParts[outer].split('')
+                buffer = 0
+                for (inner = 4; inner >= 0; inner--) {
+                    buffer = (buffer &lt;&lt; 1) | (subparts[inner].match(/[A-Z]/) ? 1 : 0)
+                }
+                output.push(base36[buffer])
+            }
+            return sfid + output.join('');
+        }
+
+
+        /**
+         * get the object info of the other  subtabs opened alongside the passed subtabid.
+         * 
+         * @param {String} liveChatTranscriptTabId 
+         * @returns {Promise} Promise object represents the object with key as ObjectName and Value as the id and object.
+         */
+        const getSiblingTabObjectInfos = liveChatTranscriptTabId => {
+            return new Promise((resolve, reject) => {
+                try {
+                    sconsole.getSubtabIds(liveChatTranscriptTabId, result => {
+                        let subtabs = _.split(result.ids, ',');
+                        let promises = _.map(subtabs, eachSubTabId => {
+                            return getObjectInfoFromTabId(eachSubTabId);
+                        });
+                        Promise.all(promises).then(lstPageInformation => {
+                            lstPageInformation = lstPageInformation.filter(pageInfo => {
+                                return pageInfo;
+                            });
+                            let mapObjectsToAttachToTranscript = _.mapKeys(
+                                _.flatten(
+                                    _.filter(
+                                        _.values(
+                                            _.map(_.groupBy(lstPageInformation,
+                                                    "object"),
+                                                item => {
+                                                    if (item.length === 1) return item;
+                                                })
+                                        )
+                                    )
+                                ),
+                                "object",
+                                "id"
+                            );
+                            if (mapObjectsToAttachToTranscript.hasOwnProperty('Contact') &amp;&amp;
+                                mapObjectsToAttachToTranscript.hasOwnProperty('Case')) {
+                                getOpenedCaseInformation(_.get(
+                                        mapObjectsToAttachToTranscript, 'Case.id'))
+                                    .then(caseRecord => {
+                                        if (caseRecord.ContactId &amp;&amp; caseRecord.ContactId !==
+                                            convertTo18DigitId(_.get(mapObjectsToAttachToTranscript,
+                                                'Contact.id'))) {
+                                            delete mapObjectsToAttachToTranscript[
+                                                'Contact'];
+                                        }
+                                        resolve(mapObjectsToAttachToTranscript);
+                                    });
+                            } else
+                                resolve(mapObjectsToAttachToTranscript);
+
+                        });
+                    });
+                } catch (ex) {
+                    reject(ex)
+                }
+            });
+        }
+
+        /**
+         * Takes the Sibling object info and The record Id to perform the update.
+         * 
+         * @param {Object} mapObjectsToAttachToTranscript 
+         * @param {String} liveChatTranscriptRecordID 
+         * @returns {Promise} Object with updateresults
+         */
+        const updateLiveChatTranscriptRecord = (
+            mapObjectsToAttachToTranscript,
+            liveChatTranscriptRecordID,
+            liveChatTranscriptRecordExisting
+        ) => {
+            return new Promise((resolve, reject) => {
+                try {
+                    let liveChatTranscriptRecord = new sforce.SObject("LiveChatTranscript");
+                    liveChatTranscriptRecord.Id = liveChatTranscriptRecordID;
+                    let hasSomeUpdate = false;
+                    if (_.isEmpty(liveChatTranscriptRecordExisting.CaseId)) {
+                        liveChatTranscriptRecord.CaseId = _.get(mapObjectsToAttachToTranscript, 'Case.id');
+                        hasSomeUpdate = true;
+                    }
+                    if (_.isEmpty(liveChatTranscriptRecordExisting.ContactId)) {
+                        liveChatTranscriptRecord.ContactId = _.get(mapObjectsToAttachToTranscript,
+                            'Contact.id');
+                        hasSomeUpdate = true;
+                    }
+                    if (_.isEmpty(liveChatTranscriptRecordExisting.LeadId)) {
+                        liveChatTranscriptRecord.LeadId = _.get(mapObjectsToAttachToTranscript, 'Lead.id');
+                        hasSomeUpdate = true;
+                    }
+                    if (hasSomeUpdate) {
+                        let updateResult = sforce.connection.update([liveChatTranscriptRecord]);
+                        let mapUpdateResults = {};
+                        updateResult.forEach(eachUpdateResult => {
+                            if (eachUpdateResult.getBoolean("success")) {
+                                mapUpdateResults[eachUpdateResult.id] = {
+                                    success: true
+                                };
+                            } else {
+                                mapUpdateResults[eachUpdateResult.id] = {
+                                    success: false,
+                                    errors: eachUpdateResult.errors
+                                };
+                            }
+                        });
+                        resolve(mapUpdateResults);
+                    } else
+                        resolve(null);
+                } catch (ex) {
+                    reject(ex);
+                }
+            });
+        }
+
+        /**
+         * get the object information when a tabId is passed.
+         * 
+         * @param {String} tabId 
+         * @returns {Promise} A promise object with PageInformation only if its a object. A dictionary array of id and ObjectName.
+         */
+        const getObjectInfoFromTabId = tabId => {
+            return new Promise((resolve, reject) => {
+                try {
+                    sconsole.getPageInfo(tabId, pageresult => {
+                        if (pageresult.success) {
+                            pageinformation = JSON.parse(_.get(pageresult, 'pageInfo'));
+                            if (pageinformation.hasOwnProperty("object")) {
+                                resolve({
+                                    id: pageinformation.objectId,
+                                    object: pageinformation.object,
+                                    tabId: tabId
+                                });
+                            } else {
+                                resolve(null);
+                            }
+                        } else {
+                            resolve(null);
+                        }
+                    });
+                } catch (ex) {
+                    reject(ex);
+                }
+            });
+        }
+
+        /**
+         * get the status of the existing LiveChatTranscript record
+         *          
+         * @returns {Promise} A promise object with the existing record maps
+         */
+        const checkLiveChatTranscriptStatus = recordId => {
+            return new Promise((resolve, reject) => {
+                try {
+                    let result = sforce.connection.query(
+                        `select id,CaseId,ContactId,LeadId from LiveChatTranscript where id = '${recordId}'`
+                    );
+                    let records = result.getArray("records");
+                    let liveChatTranscriptRecord = _.get(records, 0);
+                    let hasAllInfo = (liveChatTranscriptRecord.CaseId &amp;&amp; liveChatTranscriptRecord.LeadId &amp;&amp;
+                        liveChatTranscriptRecord.ContactId)
+                    let hasSomeInfo = (liveChatTranscriptRecord.CaseId || liveChatTranscriptRecord.LeadId ||
+                        liveChatTranscriptRecord.ContactId)
+                    resolve({
+                        recordId: recordId,
+                        hasAllInfo: !_.isNil(hasAllInfo),
+                        record: liveChatTranscriptRecord,
+                        hasSomeInfo: !_.isNil(hasSomeInfo)
+                    });
+                } catch (ex) {
+                    reject(ex);
+                }
+            });
+        }
+
+        /**
+         * Handler for the ChatEnd of LiveAgent , ensures the sibling subtabs open alongside will be mapped to LiveAgentTranscript.
+         * 
+         * @param {Object} result with chatkey and success parameters. 
+         * @returns {Promise} success or failure of the refresh after update.
+         */
+        const handleChatEnd = result => {
+            return new Promise((resolve, reject) => {
+                try {
+                    const {
+                        tabId,
+                        recordId
+                    } = _.get(primaryTabByChatKey, result.chatKey);
+                    checkLiveChatTranscriptStatus(recordId)
+                        .then(({
+                            hasAllInfo,
+                            record
+                        }) => {
+                            if (!hasAllInfo) {
+                                getSiblingTabObjectInfos(tabId)
+                                    .then(mapObjectsToAttachToTranscript => {
+                                        return updateLiveChatTranscriptRecord(
+                                            mapObjectsToAttachToTranscript,
+                                            recordId,
+                                            record
+                                        );
+                                    })
+                                    .then(updateresults => {
+                                        if (updateresults) {
+                                            sconsole.disableTabClose(false, tabId, null);
+                                            // delete primaryTabByChatKey[result.chatKey];
+                                            return refreshDetailsByTabId(tabId, false);
+                                        } else
+                                            return null;
+                                    })
+                            }
+                        });
+                } catch (ex) {
+                    reject(ex)
+                }
+            });
+        }
+
+        /**
+         * Promise wrapper to get the details of the chat based on chatkey
+         * 
+         * @param {Promise} Promise object with the chat details as a result. 
+         * @returns {Promise} chat details with primaryTabId and success.
+         */
+        const getDetailsByChatKey = (chatKey) => {
+            return new Promise((resolve, reject) => {
+                try {
+                    schat.getDetailsByChatKey(chatKey, result => {
+                        result.success ? resolve(result) : resolve(null)
+                    });
+                } catch (ex) {
+                    resolve(null)
+                }
+            });
+        }
+
+        /**
+         * Promise wrapper to get the list of all engaged chats
+         * 
+         * @param {Promise} Promise object with the list of chatkeys of engaged chats as a result.
+         * @returns {Promise} Array of String of chatkeys.
+         */
+        const getEngagedChats = () => {
+            return new Promise((resolve, reject) => {
+                schat.getEngagedChats(result => resolve(result.chatKey));
+            });
+        }
+
+        /**
+         * Execution chain which monitors the chats for appropriate assignments
+         * Flow of execution is 
+         *  - Get existing active or engaged chats with the details        
+         *  - Get the object information from the tabs
+         *  - Get the liveagenttranscript status
+         *  - prepare the primaryTabByChatKey variable with the key as chatkey and value with the tabId,recordId and isEmpty attributes to be used at chatEnd.
+         */
+        const monitorChats = () => {
+            chatInterval = setInterval(() => {
+                getEngagedChats()
+                    .then(allChatKeys => {
+                        if (allChatKeys.length > 0) {
+                            let chatKeyPromises = _.map(allChatKeys, eachChatKey => getDetailsByChatKey(
+                                eachChatKey))
+                            Promise.all(chatKeyPromises)
+                                .then(chatKeyresults => {
+                                    chatKeyresults = _.filter(chatKeyresults);
+                                    let primiaryTabIdsObjectInfo = [];
+                                    let liveChatTranscriptStatusInfo = [];
+                                    let chatKeyByTabId = {};
+                                    let chatKeyByRecordId = {};
+                                    _.each(chatKeyresults, item => {
+                                        primiaryTabIdsObjectInfo.push(
+                                            getObjectInfoFromTabId(item.primaryTabId));
+                                        if (primaryTabByChatKey.hasOwnProperty(item.details
+                                                .chatKey))
+                                            _.assign(primaryTabByChatKey[item.details.chatKey], {
+                                                tabId: item.primaryTabId
+                                            });
+                                        else
+                                            primaryTabByChatKey[item.details.chatKey] = {
+                                                tabId: item.primaryTabId
+                                            };
+                                        chatKeyByTabId[item.primaryTabId] = item.details.chatKey;
+                                    });
+                                    if (chatKeyresults.length > 0) {
+                                        Promise.all(primiaryTabIdsObjectInfo)
+                                            .then(objectresults => {
+                                                _.each(objectresults, eachObjectResult => {
+                                                    if (!_.isEmpty(eachObjectResult) &amp;&amp;
+                                                        chatKeyByTabId.hasOwnProperty(
+                                                            eachObjectResult.tabId)) {
+                                                        let chatKeyToBeAssigned = _.get(
+                                                            chatKeyByTabId,
+                                                            eachObjectResult.tabId
+                                                        );
+                                                        if (primaryTabByChatKey.hasOwnProperty(
+                                                                chatKeyToBeAssigned))
+                                                            _.assign(
+                                                                primaryTabByChatKey[
+                                                                    chatKeyToBeAssigned
+                                                                ], {
+                                                                    recordId: eachObjectResult
+                                                                        .id
+                                                                });
+                                                        else
+                                                            primaryTabByChatKey[
+                                                                chatKeyToBeAssigned] = {
+                                                                recordId: eachObjectResult
+                                                                    .id
+                                                            };
+                                                        chatKeyByRecordId[
+                                                                eachObjectResult
+                                                                .id] =
+                                                            chatKeyToBeAssigned;
+                                                        liveChatTranscriptStatusInfo.push(
+                                                            checkLiveChatTranscriptStatus(
+                                                                eachObjectResult
+                                                                .id));
+                                                    }
+                                                });
+                                                return;
+                                            })
+                                            .then(() => {
+                                                Promise.all(liveChatTranscriptStatusInfo)
+                                                    .then(liveChatTranscriptStatusInfoResults => {
+                                                        _.each(
+                                                            liveChatTranscriptStatusInfoResults,
+                                                            eachObjectResult => {
+                                                                if (!_.isEmpty(
+                                                                        eachObjectResult
+                                                                    ) &amp;&amp;
+                                                                    chatKeyByRecordId.hasOwnProperty(
+                                                                        eachObjectResult
+                                                                        .recordId)) {
+                                                                    let
+                                                                        chatKeyToBeAssigned =
+                                                                        _.get(
+                                                                            chatKeyByRecordId,
+                                                                            eachObjectResult
+                                                                            .recordId
+                                                                        );
+                                                                    if (
+                                                                        primaryTabByChatKey
+                                                                        .hasOwnProperty(
+                                                                            chatKeyToBeAssigned
+                                                                        ))
+                                                                        _.assign(
+                                                                            primaryTabByChatKey[
+                                                                                chatKeyToBeAssigned
+                                                                            ], {
+                                                                                hasSomeInfo: eachObjectResult
+                                                                                    .hasSomeInfo,
+                                                                                hasAllInfo: eachObjectResult
+                                                                                    .hasAllInfo
+                                                                            });
+                                                                    else
+                                                                        primaryTabByChatKey[
+                                                                            chatKeyToBeAssigned
+                                                                        ] = {
+                                                                            hasSomeInfo: eachObjectResult
+                                                                                .hasSomeInfo,
+                                                                            hasAllInfo: eachObjectResult
+                                                                                .hasAllInfo
+                                                                        };
+                                                                    if (
+                                                                        eachObjectResult
+                                                                        .hasSomeInfo)
+                                                                        sconsole.disableTabClose(
+                                                                            false,
+                                                                            primaryTabByChatKey[
+                                                                                chatKeyToBeAssigned
+                                                                            ].tabId, re =>
+                                                                            console.log(
+                                                                                re));
+                                                                    else
+                                                                        sconsole.disableTabClose(
+                                                                            true,
+                                                                            primaryTabByChatKey[
+                                                                                chatKeyToBeAssigned
+                                                                            ].tabId, re =>
+                                                                            console.log(
+                                                                                re));
+
+                                                                }
+                                                            });
+                                                        return;
+                                                    });
+                                            })
+                                            .catch(ex => console.log(ex));
+                                    }
+                                });
+                        }
+                    });
+            }, monitorChatInterval);
+        }
+
+
+
+        // Chat end Handler assignment
+        schat.onChatEnded(handleChatEnd);
+
+        // initiate monitor of chats.
+        monitorChats();</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#checkLiveChatTranscriptStatus">checkLiveChatTranscriptStatus</a></li><li><a href="global.html#convertTo18DigitId">convertTo18DigitId</a></li><li><a href="global.html#getDetailsByChatKey">getDetailsByChatKey</a></li><li><a href="global.html#getDetailsTabID">getDetailsTabID</a></li><li><a href="global.html#getEngagedChats">getEngagedChats</a></li><li><a href="global.html#getLiveChatTranscriptRecordID">getLiveChatTranscriptRecordID</a></li><li><a href="global.html#getLiveChatTranscriptTabID">getLiveChatTranscriptTabID</a></li><li><a href="global.html#getObjectInfoFromTabId">getObjectInfoFromTabId</a></li><li><a href="global.html#getOpenedCaseInformation">getOpenedCaseInformation</a></li><li><a href="global.html#getSiblingTabObjectInfos">getSiblingTabObjectInfos</a></li><li><a href="global.html#handleChatEnd">handleChatEnd</a></li><li><a href="global.html#monitorChats">monitorChats</a></li><li><a href="global.html#refreshDetailsByTabId">refreshDetailsByTabId</a></li><li><a href="global.html#updateLiveChatTranscriptRecord">updateLiveChatTranscriptRecord</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc3/jsdoc">JSDoc 3.5.5</a> on Tue Dec 19 2017 17:11:13 GMT+0100 (CET)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>
